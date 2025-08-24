@@ -1,6 +1,7 @@
 import asyncio
 import os
 import httpx
+import re
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,7 @@ class MonitorConfig(BaseModel):
     apiId: str
     apiHash: str
     telegramBotConfig: TelegramBotConfig
+    useRegex: bool = False  # 新增字段：是否使用正则表达式匹配
     # isEnabled, backendUrl 等前端字段在此处非必需
 
 class StopRequestBody(BaseModel):
@@ -73,6 +75,45 @@ def parse_channel_identifier(channel: str) -> str:
         channel = '@' + channel
     
     return channel
+
+def check_keyword_match(message_text: str, keywords: List[str], use_regex: bool = False) -> bool:
+    """
+    检查消息文本是否匹配关键词列表
+    
+    Args:
+        message_text: 消息文本
+        keywords: 关键词列表
+        use_regex: 是否使用正则表达式匹配
+    
+    Returns:
+        bool: 是否匹配
+    """
+    if not keywords:
+        return True  # 没有关键词时匹配所有消息
+    
+    if not message_text:
+        return False
+    
+    for keyword in keywords:
+        if not keyword:  # 跳过空关键词
+            continue
+            
+        try:
+            if use_regex:
+                # 使用正则表达式匹配（忽略大小写）
+                if re.search(keyword, message_text, re.IGNORECASE):
+                    return True
+            else:
+                # 使用普通字符串包含匹配（忽略大小写）
+                if keyword.lower() in message_text.lower():
+                    return True
+        except re.error as e:
+            # 正则表达式语法错误时，降级为普通字符串匹配
+            print(f"正则表达式语法错误: {keyword}, 错误: {e}，降级为字符串匹配")
+            if keyword.lower() in message_text.lower():
+                return True
+    
+    return False
 
 # --- Telegram Bot 通知逻辑 ---
 async def send_telegram_message(config: dict, message_text: str, message_link: str):
@@ -175,16 +216,14 @@ async def monitor_channel(config: dict, task_ref: dict):
             print(f"[{monitor_id}] 收到消息: {message_text[:50]}...")
             
             keywords = config.get('keywords', [])
-            should_notify = not keywords # 如果没有关键词，则匹配所有消息
+            use_regex = config.get('useRegex', False)
             
-            if not should_notify:
-                for keyword in keywords:
-                    if keyword.lower() in message_text.lower():
-                        should_notify = True
-                        break
+            # 使用新的关键词匹配函数
+            should_notify = check_keyword_match(message_text, keywords, use_regex)
             
             if should_notify:
-                print(f"[{monitor_id}] 关键词匹配成功！准备发送 Telegram 通知。")
+                match_type = "正则表达式" if use_regex else "字符串"
+                print(f"[{monitor_id}] {match_type}关键词匹配成功！准备发送 Telegram 通知。")
                 
                 # 构造消息链接
                 if hasattr(channel_entity, 'username') and channel_entity.username:
@@ -249,7 +288,7 @@ async def start_monitor_endpoint(config: MonitorConfig):
     task_ref = {}
     
     try:
-        task = asyncio.create_task(monitor_channel(config.dict(), task_ref))
+        task = asyncio.create_task(monitor_channel(config.model_dump(), task_ref))
         await asyncio.sleep(0.5)
         
         if task.done():
