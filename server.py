@@ -2,6 +2,8 @@ import asyncio
 import os
 import httpx
 import re
+import sys
+import socket
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +12,79 @@ from typing import List, Dict, Optional
 
 from telethon import TelegramClient, events
 from config import config as server_config
+
+# --- 网络连接检查函数 ---
+async def check_telegram_connectivity():
+    """检查网络连接到 Telegram 服务器"""
+    
+    # 获取代理配置
+    proxy_config = server_config.telegram.proxy.get_proxy_dict()
+    
+    # Telegram 服务器列表
+    telegram_servers = [
+        ("149.154.167.51", 443),
+        ("149.154.175.53", 443),
+        ("91.108.56.165", 443),
+    ]
+    
+    connection_success = False
+    
+    if proxy_config:
+        print(f"使用代理: {proxy_config['proxy_type']}://{proxy_config['addr']}:{proxy_config['port']}")
+        
+        try:
+            session_path = os.path.join(SESSION_DIR, "connectivity_test.session")
+            test_client = TelegramClient(
+                session_path,
+                int(server_config.telegram.api_id),
+                server_config.telegram.api_hash,
+                proxy=proxy_config
+            )
+            
+            await test_client.connect()
+            print("✅ 代理连接成功")
+            connection_success = True
+            await test_client.disconnect()
+            
+            if os.path.exists(session_path):
+                os.remove(session_path)
+            
+        except Exception as e:
+            print(f"❌ 代理连接失败: {e}")
+    else:
+        print("检查直连...")
+        
+        for server, port in telegram_servers:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex((server, port))
+                sock.close()
+                
+                if result == 0:
+                    print(f"✅ 直连成功: {server}")
+                    connection_success = True
+                    break
+            except Exception:
+                continue
+    
+    if not connection_success:
+        print("\n❌ 无法连接 Telegram 服务器")
+        print("解决方案:")
+        print("1. 检查网络连接")
+        print("2. 配置代理: python setup.py")
+        
+        try:
+            user_input = input("\n配置代理? (y/n): ").strip().lower()
+            if user_input in ['y', 'yes']:
+                print("运行: python setup.py")
+                sys.exit(1)
+            else:
+                print("⚠️  跳过代理配置")
+        except KeyboardInterrupt:
+            sys.exit(1)
+    else:
+        print("✅ 连接检查通过")
 
 # --- Pydantic 模型 ---
 class MonitorConfig(BaseModel):
@@ -110,10 +185,16 @@ def check_keyword_match(message_text: str, keywords: List[str], use_regex: bool 
     return False
 
 # --- Telegram Bot 通知逻辑 ---
+def escape_html(text: str) -> str:
+    """
+    转义HTML格式的特殊字符
+    HTML需要转义的字符: <, >, &
+    """
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
 async def send_telegram_message(config: dict, message_text: str, message_link: str):
     # 使用服务器配置的Bot
     if not server_config.validate_bot():
-        print(f"[{config['id']}] 服务器未配置 Bot Token 或 Chat ID，跳过通知。")
         return
 
     token = server_config.bot_token
@@ -130,6 +211,9 @@ async def send_telegram_message(config: dict, message_text: str, message_link: s
     
     final_message = f"{notification_header}{truncated_message}"
     
+    # 转义HTML特殊字符
+    escaped_message = escape_html(final_message)
+    
     # 串行发送到多个 Chat ID
     successful_sends = []
     failed_sends = []
@@ -137,8 +221,8 @@ async def send_telegram_message(config: dict, message_text: str, message_link: s
     for chat_id in chat_ids:
         payload = {
             'chat_id': chat_id,
-            'text': final_message,
-            'parse_mode': 'MarkdownV2'
+            'text': escaped_message,
+            'parse_mode': 'HTML'
         }
         
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -148,33 +232,46 @@ async def send_telegram_message(config: dict, message_text: str, message_link: s
                 response = await client.post(url, json=payload, timeout=10)
                 if response.status_code == 200:
                     successful_sends.append(chat_id)
-                    print(f"[{config['id']}] ✅ Telegram 通知已发送至 {chat_id}")
                 else:
                     failed_sends.append({"chat_id": chat_id, "error": f"{response.status_code} - {response.text}"})
-                    print(f"[{config['id']}] ❌ 发送至 {chat_id} 失败: {response.status_code} - {response.text}")
         except Exception as e:
             failed_sends.append({"chat_id": chat_id, "error": str(e)})
-            print(f"[{config['id']}] ❌ 发送至 {chat_id} 时发生网络错误: {e}")
     
-    # 记录发送结果汇总
-    total_targets = len(chat_ids)
+    # 记录发送结果
     success_count = len(successful_sends)
     failed_count = len(failed_sends)
     
-    print(f"[{config['id']}] 📄 发送完成: 成功 {success_count}/{total_targets}, 失败 {failed_count}")
-    
     if failed_count > 0:
-        print(f"[{config['id']}] ⚠️  失败的Chat ID: {[f['chat_id'] for f in failed_sends]}")
+        print(f"[{config['id']}] 通知: {success_count}成功 {failed_count}失败")
 
 # --- Telethon 监控逻辑 ---
 async def monitor_channel(config: dict, task_ref: dict):
     # 使用服务器配置而非前端传递的参数
     session_path = os.path.join(SESSION_DIR, f"{config['id']}.session")
-    client = TelegramClient(
-        session_path,
-        int(server_config.telegram.api_id),
-        server_config.telegram.api_hash
-    )
+    
+    # 如果特定的会话文件不存在，尝试使用默认会话文件
+    default_session_path = os.path.join(SESSION_DIR, "default.session")
+    if not os.path.exists(session_path) and os.path.exists(default_session_path):
+        print(f"[{config['id']}] 特定会话文件不存在，使用默认会话: {default_session_path}")
+        session_path = default_session_path
+    
+    # 创建客户端，如果配置了代理则使用代理
+    proxy_config = server_config.telegram.proxy.get_proxy_dict()
+    if proxy_config:
+        print(f"[{config['id']}] 使用代理连接: {proxy_config['proxy_type']}://{proxy_config['addr']}:{proxy_config['port']}")
+        client = TelegramClient(
+            session_path,
+            int(server_config.telegram.api_id),
+            server_config.telegram.api_hash,
+            proxy=proxy_config
+        )
+    else:
+        print(f"[{config['id']}] 直连 Telegram 服务器")
+        client = TelegramClient(
+            session_path,
+            int(server_config.telegram.api_id),
+            server_config.telegram.api_hash
+        )
     
     monitor_id = config['id']
     
@@ -182,34 +279,29 @@ async def monitor_channel(config: dict, task_ref: dict):
         # 解析频道标识符
         original_channel = config['channel']
         parsed_channel = parse_channel_identifier(original_channel)
-        print(f"[{monitor_id}] 原始频道: {original_channel} -> 解析后: {parsed_channel}")
+        print(f"[{monitor_id}] 监控频道: {parsed_channel}")
         
-        print(f"[{monitor_id}] 连接 Telegram 并开始监听频道: {parsed_channel}...")
         try:
+            # 先连接客户端
+            await client.connect()
+            
             # 检查是否需要验证
             if not await client.is_user_authorized():
-                print(f"[{monitor_id}] 检测到首次登录，将使用服务器配置的手机号: {server_config.telegram.phone}")
-                print(f"[{monitor_id}] ⚠️  重要提示: 验证码将发送到手机 {server_config.telegram.phone}")
-                print(f"[{monitor_id}] ⚠️  请在【服务器控制台】输入验证码")
-                print(f"[{monitor_id}] ⚠️  前端页面可能会显示'加载中'，这是正常现象")
+                print(f"[{monitor_id}] 首次登录，等待验证码...")
                 await client.start(phone=server_config.telegram.phone)
-                print(f"[{monitor_id}] ✅ 首次登录认证完成！会话文件已保存")
-            else:
-                await client.start()
-            print(f"[{monitor_id}] Telegram 客户端连接成功")
+                print(f"[{monitor_id}] ✅ 认证完成")
+            
+            print(f"[{monitor_id}] ✅ 连接成功")
         except Exception as e:
             error_str = str(e)
-            print(f"[{monitor_id}] Telegram 连接失败: {error_str}")
+            print(f"[{monitor_id}] ❌ 连接失败: {error_str}")
             
-            if "AUTH_KEY_UNREGISTERED" in error_str or "UNAUTHORIZED" in error_str:
-                print(f"[{monitor_id}] 错误: API 凭证无效或未授权")
-                print(f"[{monitor_id}] 请检查: 1) API ID 和 API Hash 是否正确 2) 是否需要在终端输入验证码")
+            if "AUTH_KEY_UNREGISTERED" in error_str:
+                print(f"[{monitor_id}] 错误: API 凭证无效")
             elif "PHONE_NUMBER_INVALID" in error_str:
-                print(f"[{monitor_id}] 错误: 手机号码无效")
+                print(f"[{monitor_id}] 错误: 手机号无效")
             elif "ConnectionError" in error_str or "TimeoutError" in error_str:
                 print(f"[{monitor_id}] 错误: 网络连接问题")
-            else:
-                print(f"[{monitor_id}] 可能的原因: 需要验证码或 API 凭证错误")
             raise
         
         current_task = asyncio.current_task()
@@ -219,10 +311,9 @@ async def monitor_channel(config: dict, task_ref: dict):
         # 获取频道实体
         try:
             channel_entity = await client.get_entity(parsed_channel)
-            print(f"[{monitor_id}] 成功获取频道实体: {channel_entity.title if hasattr(channel_entity, 'title') else parsed_channel}")
+            print(f"[{monitor_id}] ✅ 获取频道: {channel_entity.title if hasattr(channel_entity, 'title') else parsed_channel}")
         except Exception as e:
-            print(f"[{monitor_id}] 无法获取频道实体: {e}")
-            print(f"[{monitor_id}] 请检查: 1) 频道名称是否正确 2) 是否已加入该频道 3) 频道是否公开")
+            print(f"[{monitor_id}] ❌ 无法获取频道: {e}")
             raise
         
         @client.on(events.NewMessage(chats=parsed_channel))
@@ -232,8 +323,6 @@ async def monitor_channel(config: dict, task_ref: dict):
             if not message_text:
                 return
 
-            print(f"[{monitor_id}] 收到消息: {message_text[:50]}...")
-            
             keywords = config.get('keywords', [])
             use_regex = config.get('useRegex', False)
             
@@ -241,8 +330,7 @@ async def monitor_channel(config: dict, task_ref: dict):
             should_notify = check_keyword_match(message_text, keywords, use_regex)
             
             if should_notify:
-                match_type = "正则表达式" if use_regex else "字符串"
-                print(f"[{monitor_id}] {match_type}关键词匹配成功！准备发送 Telegram 通知。")
+                print(f"[{monitor_id}] 🎯 关键词匹配")
                 
                 # 构造消息链接
                 if hasattr(channel_entity, 'username') and channel_entity.username:
@@ -252,27 +340,26 @@ async def monitor_channel(config: dict, task_ref: dict):
                 
                 await send_telegram_message(config, message_text, message_link)
         
-        print(f"[{monitor_id}] 监控已成功启动。")
+        print(f"[{monitor_id}] 🚀 监控启动")
         await client.run_until_disconnected()
         
     except asyncio.CancelledError:
-        print(f"[{monitor_id}] 监控任务被取消。")
+        print(f"[{monitor_id}] 监控取消")
         raise
     except Exception as e:
-        print(f"[{monitor_id}] 监控时发生错误: {e}")
+        print(f"[{monitor_id}] 监控错误: {e}")
         if monitor_id in active_monitors: del active_monitors[monitor_id]
         raise
     finally:
         if client.is_connected(): await client.disconnect()
         if monitor_id in active_monitors: del active_monitors[monitor_id]
-        print(f"[{monitor_id}] 客户端已断开连接，监控任务结束。")
+        print(f"[{monitor_id}] 监控结束")
 
 async def stop_monitor_internal(monitor_id: str):
     if monitor_id in active_monitors:
         monitor_info = active_monitors.pop(monitor_id)
         task = monitor_info['task']
         
-        print(f"[{monitor_id}] 正在停止监控...")
         task.cancel()
         
         try:
@@ -280,10 +367,9 @@ async def stop_monitor_internal(monitor_id: str):
         except asyncio.CancelledError:
             pass # 任务取消是预期的
 
-        print(f"[{monitor_id}] 监控已成功停止。")
+        print(f"[{monitor_id}] 监控已停止")
         return True, f"监控 {monitor_id} 已停止"
     else:
-        print(f"[{monitor_id}] 尝试停止，但未找到正在运行的监控。")
         return False, f"未找到正在运行的监控 {monitor_id}"
 
 # --- API 端点 ---
@@ -307,21 +393,19 @@ async def start_monitor_endpoint(config: MonitorConfig):
     # 验证输入参数
     try:
         parsed_channel = parse_channel_identifier(config.channel)
-        print(f"[{monitor_id}] 验证参数成功: {config.channel} -> {parsed_channel}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"频道标识符错误: {str(e)}")
     
     if monitor_id in active_monitors:
-        print(f"[{monitor_id}] 监控已在运行，将重启...")
         await stop_monitor_internal(monitor_id)
         await asyncio.sleep(1)
 
-    print(f"[{monitor_id}] 正在启动新监控...")
     task_ref = {}
     
     try:
         task = asyncio.create_task(monitor_channel(config.model_dump(), task_ref))
-        await asyncio.sleep(0.5)
+        # 给任务更多时间初始化
+        await asyncio.sleep(2.0)
         
         if task.done():
             try: 
@@ -329,11 +413,11 @@ async def start_monitor_endpoint(config: MonitorConfig):
             except Exception as e: 
                 error_msg = str(e)
                 if "Could not find the input entity" in error_msg:
-                    error_msg = f"无法找到频道 '{config.channel}'。请检查: 1) 频道名称是否正确 2) 是否已加入该频道 3) 频道是否公开"
+                    error_msg = f"无法找到频道 '{config.channel}'"
                 elif "AUTH_KEY_UNREGISTERED" in error_msg:
-                    error_msg = "账户未注册，请检查服务器 API 配置"
+                    error_msg = "账户未注册，请检查服务器配置"
                 elif "PHONE_NUMBER_INVALID" in error_msg:
-                    error_msg = "手机号码无效，请检查服务器 Telegram 配置"
+                    error_msg = "手机号无效"
                 raise HTTPException(status_code=500, detail=f"监控启动失败: {error_msg}")
         
         if monitor_id not in active_monitors:
@@ -345,7 +429,6 @@ async def start_monitor_endpoint(config: MonitorConfig):
     except HTTPException: 
         raise
     except Exception as e:
-        print(f"[{monitor_id}] 启动监控时发生未知错误: {e}")
         raise HTTPException(status_code=500, detail=f"内部错误: {str(e)}")
 
 @app.post("/monitor/stop")
@@ -373,6 +456,22 @@ async def check_server_config():
         "bot_message": f"已配置 {len(server_config.chat_ids)} 个通知目标" if bot_valid else "请检查 config.py 中的 Bot Token/Chat IDs"
     }
 
-# --- 启动说明 ---
-# 要运行此服务，请在终端中使用 uvicorn:
-# uvicorn server:app --host 0.0.0.0 --port 8080
+# --- 启动事件处理 ---
+@app.on_event("startup")
+async def startup_event():
+    """服务启动时执行的检查"""
+    print("\n🚀 Telemon Backend 启动中...")
+    
+    # 检查服务器配置
+    if not server_config.telegram.validate():
+        print("❌ Telegram API 配置不完整，请运行: python setup.py")
+        sys.exit(1)
+    
+    if not server_config.validate_bot():
+        print("❌ Bot 配置不完整，请运行: python setup.py")
+        sys.exit(1)
+    
+    # 执行网络连接检查
+    await check_telegram_connectivity()
+    
+    print("✅ 服务启动成功！现在可以使用监控功能。\n")
