@@ -204,7 +204,7 @@ pip install -r requirements.txt
 
 **POST** `/monitor/stop`
 
-停止指定的监控任务。
+停止指定的监控任务。监控配置将保留，可以后续恢复。
 
 #### 请求参数
 
@@ -230,25 +230,159 @@ pip install -r requirements.txt
 **错误响应** (404):
 ```json
 {
-  "detail": "未找到正在运行的监控 monitor_001"
+  "detail": "未找到监控 monitor_001"
 }
 ```
 
-### 3. 查看状态
+### 3. 恢复监控
 
-**GET** `/status`
+**POST** `/monitor/resume`
 
-获取当前正在运行的监控任务列表。
+恢复已停止的监控任务。使用之前保存的配置重新启动监控。
+
+#### 请求参数
+
+```json
+{
+  "id": "monitor_001"
+}
+```
+
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| id | string | ✅ | 要恢复的监控任务ID |
 
 #### 响应格式
 
+**成功响应** (200):
 ``json
 {
-  "active_monitors": ["monitor_001", "monitor_002"]
+  "message": "监控 monitor_001 已成功恢复"
 }
 ```
 
-### 4. 检查服务器配置
+**错误响应** (400/404/500):
+```json
+{
+  "detail": "未找到监控 monitor_001 的配置"
+}
+```
+
+#### 常见错误码
+
+| 状态码 | 错误类型 | 说明 |
+|--------|----------|---------|
+| 400 | 状态错误 | 监控已在运行或配置错误 |
+| 404 | 配置不存在 | 未找到监控配置 |
+| 500 | 服务器错误 | 恢复失败或配置错误 |
+
+### 4. 删除监控
+
+**POST** `/monitor/delete`
+
+彻底删除监控任务和配置。这是不可逆的操作，删除后无法恢复。
+
+#### 请求参数
+
+```json
+{
+  "id": "monitor_001"
+}
+```
+
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| id | string | ✅ | 要删除的监控任务ID |
+
+#### 响应格式
+
+**成功响应** (200):
+``json
+{
+  "message": "监控 monitor_001 已彻底删除"
+}
+```
+
+**错误响应** (404):
+```json
+{
+  "detail": "未找到监控 monitor_001"
+}
+```
+
+### 5. 查看状态
+
+**GET** `/status`
+
+获取当前所有监控任务的详细信息（包括已停止的）。
+
+#### 响应格式
+
+**成功响应** (200):
+```json
+{
+  "active_monitors": ["monitor_001"],
+  "monitors": [
+    {
+      "id": "monitor_001",
+      "channel": "tech_news",
+      "keywords": ["AI", "人工智能"],
+      "useRegex": false,
+      "status": "running"
+    },
+    {
+      "id": "monitor_002",
+      "channel": "crypto_news",
+      "keywords": ["Bitcoin", "以太坊", "区块链"],
+      "useRegex": true,
+      "status": "stopped"
+    },
+    {
+      "id": "monitor_003",
+      "channel": "news_channel",
+      "keywords": ["破发", "紧急"],
+      "useRegex": false,
+      "status": "error"
+    }
+  ]
+}
+```
+
+**响应字段说明**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| active_monitors | string[] | 活跃监控ID列表（向后兼容） |
+| monitors | object[] | 所有监控信息列表（包括已停止的） |
+
+**monitors 数组对象字段**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | string | 监控任务ID |
+| channel | string | 频道名称（自动去除@前缀） |
+| keywords | string[] | 关键词列表 |
+| useRegex | boolean | 是否使用正则表达式匹配 |
+| status | string | 监控状态 |
+
+**监控状态说明**:
+
+| 状态 | 说明 |
+|------|------|
+| running | 正在运行 |
+| stopped | 已停止（可恢复） |
+| starting | 启动中 |
+| error | 错误状态（可重试） |
+
+**空状态响应**（无监控任务时）:
+```json
+{
+  "active_monitors": [],
+  "monitors": []
+}
+```
+
+### 6. 检查服务器配置
 
 **GET** `/config/check`
 

@@ -108,7 +108,8 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None
 )
-active_monitors: Dict[str, Dict] = {}  # { 'monitor_id': {'client': client, 'task': task} }
+active_monitors: Dict[str, Dict] = {}  # { 'monitor_id': {'client': client, 'task': task, 'config': config} }
+monitor_configs: Dict[str, Dict] = {}  # 存储所有监控配置信息（包括已停止的），格式: {'config': {...}, 'status': 'running'|'stopped'}
 
 # --- CORS 中间件 ---
 app.add_middleware(
@@ -306,7 +307,8 @@ async def monitor_channel(config: dict, task_ref: dict):
         
         current_task = asyncio.current_task()
         task_ref['task'] = current_task
-        active_monitors[monitor_id] = {'client': client, 'task': current_task}
+        active_monitors[monitor_id] = {'client': client, 'task': current_task, 'config': config}
+        monitor_configs[monitor_id] = config
         
         # 获取频道实体
         try:
@@ -349,16 +351,24 @@ async def monitor_channel(config: dict, task_ref: dict):
     except Exception as e:
         print(f"[{monitor_id}] 监控错误: {e}")
         if monitor_id in active_monitors: del active_monitors[monitor_id]
+        # 更新状态为错误，保留配置以便重试
+        if monitor_id in monitor_configs:
+            monitor_configs[monitor_id]['status'] = 'error'
         raise
     finally:
         if client.is_connected(): await client.disconnect()
         if monitor_id in active_monitors: del active_monitors[monitor_id]
+        # 不删除 monitor_configs，保留配置以便恢复
         print(f"[{monitor_id}] 监控结束")
 
 async def stop_monitor_internal(monitor_id: str):
     if monitor_id in active_monitors:
         monitor_info = active_monitors.pop(monitor_id)
         task = monitor_info['task']
+        
+        # 更新状态为停止，但保留配置
+        if monitor_id in monitor_configs:
+            monitor_configs[monitor_id]['status'] = 'stopped'
         
         task.cancel()
         
@@ -369,8 +379,13 @@ async def stop_monitor_internal(monitor_id: str):
 
         print(f"[{monitor_id}] 监控已停止")
         return True, f"监控 {monitor_id} 已停止"
+    elif monitor_id in monitor_configs:
+        # 监控已经停止但配置还在
+        monitor_configs[monitor_id]['status'] = 'stopped'
+        print(f"[{monitor_id}] 监控已停止")
+        return True, f"监控 {monitor_id} 已停止"
     else:
-        return False, f"未找到正在运行的监控 {monitor_id}"
+        return False, f"未找到监控 {monitor_id}"
 
 # --- API 端点 ---
 @app.post("/monitor/start")
@@ -402,6 +417,13 @@ async def start_monitor_endpoint(config: MonitorConfig):
 
     task_ref = {}
     
+    # 保存配置信息用于状态查询，使用新的状态管理机制
+    config_dict = config.model_dump()
+    monitor_configs[monitor_id] = {
+        'config': config_dict,
+        'status': 'starting'  # 初始状态
+    }
+    
     try:
         task = asyncio.create_task(monitor_channel(config.model_dump(), task_ref))
         # 给任务更多时间初始化
@@ -422,7 +444,14 @@ async def start_monitor_endpoint(config: MonitorConfig):
         
         if monitor_id not in active_monitors:
             task.cancel()
+            # 更新状态为错误
+            if monitor_id in monitor_configs:
+                monitor_configs[monitor_id]['status'] = 'error'
             raise HTTPException(status_code=500, detail="监控注册失败")
+            
+        # 更新状态为运行中
+        if monitor_id in monitor_configs:
+            monitor_configs[monitor_id]['status'] = 'running'
             
         return {"message": f"监控 {monitor_id} 已成功启动"}
         
@@ -438,9 +467,153 @@ async def stop_monitor_endpoint(body: StopRequestBody):
     if success: return {"message": message}
     else: raise HTTPException(status_code=404, detail=message)
 
+@app.post("/monitor/resume")
+async def resume_monitor_endpoint(body: StopRequestBody):
+    """恢复已停止的监控任务"""
+    monitor_id = body.id
+    
+    # 检查是否存在已停止的监控配置
+    if monitor_id not in monitor_configs:
+        raise HTTPException(status_code=404, detail=f"未找到监控 {monitor_id} 的配置")
+    
+    monitor_data = monitor_configs[monitor_id]
+    current_status = monitor_data.get('status', 'unknown')
+    
+    # 检查状态
+    if current_status == 'running':
+        raise HTTPException(status_code=400, detail=f"监控 {monitor_id} 已经在运行中")
+    
+    if monitor_id in active_monitors:
+        raise HTTPException(status_code=400, detail=f"监控 {monitor_id} 已经在运行中")
+    
+    # 获取原始配置
+    config_dict = monitor_data.get('config', {})
+    if not config_dict:
+        raise HTTPException(status_code=400, detail=f"监控 {monitor_id} 的配置为空")
+    
+    # 重用启动监控的逻辑
+    try:
+        # 检查服务器配置
+        if not server_config.telegram.validate():
+            raise HTTPException(
+                status_code=500, 
+                detail="服务器 Telegram API 配置不完整，请检查 config.py 或环境变量"
+            )
+        
+        if not server_config.validate_bot():
+            raise HTTPException(
+                status_code=500,
+                detail="服务器 Bot 配置不完整，请检查 config.py 中的 Bot Token 和 Chat ID"
+            )
+        
+        # 验证输入参数
+        try:
+            parsed_channel = parse_channel_identifier(config_dict.get('channel', ''))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"频道标识符错误: {str(e)}")
+        
+        # 更新状态为启动中
+        monitor_configs[monitor_id]['status'] = 'starting'
+        
+        task_ref = {}
+        task = asyncio.create_task(monitor_channel(config_dict, task_ref))
+        
+        # 给任务更多时间初始化
+        await asyncio.sleep(2.0)
+        
+        if task.done():
+            try: 
+                await task
+            except Exception as e: 
+                error_msg = str(e)
+                if "Could not find the input entity" in error_msg:
+                    error_msg = f"无法找到频道 '{config_dict.get('channel', '')}'"
+                elif "AUTH_KEY_UNREGISTERED" in error_msg:
+                    error_msg = "账户未注册，请检查服务器配置"
+                elif "PHONE_NUMBER_INVALID" in error_msg:
+                    error_msg = "手机号无效"
+                # 更新状态为错误
+                monitor_configs[monitor_id]['status'] = 'error'
+                raise HTTPException(status_code=500, detail=f"监控恢复失败: {error_msg}")
+        
+        if monitor_id not in active_monitors:
+            task.cancel()
+            monitor_configs[monitor_id]['status'] = 'error'
+            raise HTTPException(status_code=500, detail="监控注册失败")
+            
+        # 更新状态为运行中
+        monitor_configs[monitor_id]['status'] = 'running'
+            
+        return {"message": f"监控 {monitor_id} 已成功恢复"}
+        
+    except HTTPException: 
+        raise
+    except Exception as e:
+        # 更新状态为错误
+        if monitor_id in monitor_configs:
+            monitor_configs[monitor_id]['status'] = 'error'
+        raise HTTPException(status_code=500, detail=f"内部错误: {str(e)}")
+
+@app.post("/monitor/delete")
+async def delete_monitor_endpoint(body: StopRequestBody):
+    """彻底删除监控任务和配置"""
+    monitor_id = body.id
+    
+    # 先停止监控（如果正在运行）
+    if monitor_id in active_monitors:
+        monitor_info = active_monitors.pop(monitor_id)
+        task = monitor_info['task']
+        
+        task.cancel()
+        
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # 任务取消是预期的
+        
+        print(f"[{monitor_id}] 监控已停止")
+    
+    # 删除配置
+    if monitor_id in monitor_configs:
+        del monitor_configs[monitor_id]
+        print(f"[{monitor_id}] 配置已删除")
+        return {"message": f"监控 {monitor_id} 已彻底删除"}
+    else:
+        raise HTTPException(status_code=404, detail=f"未找到监控 {monitor_id}")
+
 @app.get("/status")
 async def get_status():
-    return {"active_monitors": list(active_monitors.keys())}
+    """获取所有监控任务的详细状态信息（包括已停止的）"""
+    monitor_list = []
+    active_list = []  # 保持向后兼容
+    
+    # 遍历所有配置（包括已停止的）
+    for monitor_id, monitor_data in monitor_configs.items():
+        config = monitor_data.get('config', {})
+        status = monitor_data.get('status', 'unknown')
+        
+        # 解析频道名称，去除 @ 前缀用于展示
+        channel_display = config.get('channel', '')
+        if channel_display.startswith('@'):
+            channel_display = channel_display[1:]
+        
+        monitor_info = {
+            "id": monitor_id,
+            "channel": channel_display,
+            "keywords": config.get('keywords', []),
+            "useRegex": config.get('useRegex', False),
+            "status": status
+        }
+        monitor_list.append(monitor_info)
+        
+        # 保持向后兼容：只有运行中的监控才加入 active_monitors
+        if status == 'running':
+            active_list.append(monitor_id)
+    
+    return {
+        "active_monitors": active_list,  # 保持向后兼容
+        "monitors": monitor_list  # 新的详细信息（包括所有状态）
+    }
 
 @app.get("/config/check")
 async def check_server_config():
