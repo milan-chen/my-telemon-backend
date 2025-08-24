@@ -6,7 +6,8 @@
 
 - **实时监控**: 基于 Telethon 监听指定 Telegram 频道的消息
 - **关键词匹配**: 支持自定义关键词列表，支持普通字符串匹配和正则表达式匹配两种模式
-- **Telegram Bot 通知**: 集成 Telegram Bot API，支持向指定聊天室发送通知消息
+- **服务端配置**: 所有敏感信息（API 凭证、Bot 配置）由服务器统一管理，安全可靠
+- **Telegram Bot 通知**: 集成 Telegram Bot API，统一向指定聊天室发送通知消息
 - **异步架构**: 基于 FastAPI 异步框架，支持多个监控任务同时运行
 - **会话管理**: 自动维护 Telegram 客户端会话，无需重复登录
 - **RESTful API**: 提供简洁的 HTTP 接口，便于前端集成
@@ -16,6 +17,8 @@
 ```
 my-telemon-backend/
 ├── server.py          # 主程序入口，包含 API 路由和监控逻辑
+├── config.py          # 服务器配置文件（通过 setup.py 自动生成）
+├── setup.py           # 首次配置脚本
 ├── requirements.txt    # Python 依赖列表
 ├── start.sh           # 便捷启动脚本
 ├── sessions/          # Telegram 会话文件存储目录（自动创建）
@@ -53,6 +56,11 @@ my-telemon-backend/
 5. 将机器人添加到目标聊天室中
 6. 获取 Chat ID（可使用 @userinfobot 或直接查看聊天室信息）
 
+**支持多个通知目标**：
+- 个人私聊：正整数 Chat ID（如 `123456789`）
+- 群组：负整数 Chat ID（如 `-987654321`）
+- 频道：以 `-100` 开头的 Chat ID（如 `-1001234567890`）
+
 ## 🚀 快速开始
 
 ### 1. 克隆项目
@@ -72,33 +80,33 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 启动服务
+### 3. 一键启动服务
 
-**方式一：使用启动脚本（推荐）**
+**推荐方式**（自动处理所有配置）：
 
 ```bash
-# 开发模式（带热重载）
+# 开发模式（带热重载）- 推荐
 ./start.sh dev
 
 # 生产模式
 ./start.sh
 ```
 
-**方式二：手动启动**
+**脚本自动处理**：
+- ✅ 自动检测虚拟环境并激活
+- ✅ 自动安装缺失的依赖
+- ✅ 自动检测并引导首次配置
+- ✅ 自动验证 Telegram 认证状态
+- ✅ 启动服务
 
-开发环境（带热重载）：
+**重新配置**（如需要）：
+
 ```bash
-source .venv/bin/activate
-uvicorn server:app --reload --host 0.0.0.0 --port 8080
+# 强制重新配置
+./start.sh --setup
 ```
 
-生产环境：
-```bash
-source .venv/bin/activate
-uvicorn server:app --host 0.0.0.0 --port 8080
-```
-
-服务启动后，可通过 API 端点进行调用。
+> **💡 提示**: 首次运行时，脚本会自动引导您完成 Telegram API 和 Bot 的配置，无需手动操作。
 
 ## 📚 API 文档
 
@@ -108,63 +116,89 @@ uvicorn server:app --host 0.0.0.0 --port 8080
 
 启动一个新的 Telegram 频道监控任务。
 
-**请求体:**
-```json
+#### 请求参数
+
+**Content-Type**: `application/json`
+
+**请求体 (JSON)**:
+``json
 {
   "id": "monitor_001",
-  "channel": "@channel_username",
+  "channel": "@channel_username", 
   "keywords": ["关键词1", "关键词2"],
-  "useRegex": false,
-  "apiId": "你的API_ID",
-  "apiHash": "你的API_HASH",
-  "telegramBotConfig": {
-    "botToken": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
-    "chatId": "-1001234567890"
-  }
+  "useRegex": false
 }
 ```
 
-**频道格式说明:**
-支持多种频道标识符格式：
-- `@channel_username` (推荐)
-- `https://t.me/channel_username`
-- `t.me/channel_username`
-- `channel_username`
-
-**关键词匹配配置:**
-
-| 参数 | 类型 | 默认值 | 说明 |
+| 字段 | 类型 | 必需 | 说明 |
 |------|------|------|------|
-| keywords | string[] | [] | 关键词列表 |
-| useRegex | boolean | false | 是否使用正则表达式匹配 |
+| id | string | ✅ | 监控任务的唯一标识符，由前端生成 |
+| channel | string | ✅ | 目标频道标识符，支持多种格式 |
+| keywords | string[] | ✅ | 关键词列表（空数组匹配所有消息） |
+| useRegex | boolean | ❌ | 是否使用正则表达式匹配（默认false） |
 
-**匹配模式说明:**
+> **⚠️ 重要说明**: 
+> - 所有敏感信息（API凭证、Bot配置）由服务器端统一管理
+> - 前端只需提供业务逻辑参数
+> - 通知将自动发送到服务器配置的所有Chat ID
 
-1. **普通字符串匹配** (useRegex: false)
-   - 不区分大小写的字符串包含匹配
-   - 示例：关键词 "测试" 可以匹配 "这是一个测试消息"
-   
-2. **正则表达式匹配** (useRegex: true)
-   - 支持完整的正则表达式语法，不区分大小写
-   - 示例：
-     - `"\\d+"` - 匹配任意数字
-     - `"[\\u4e00-\\u9fa5]+"` - 匹配中文字符
-     - `"\\w+@\\w+\\.\\w+"` - 匹配邮箱格式
-     - `"\\$\\d+\\.\\d{2}"` - 匹配价格格式 ($45.99)
-   - 注意：JSON中需要双反斜杠转义
-   - 如果正则表达式语法错误，会自动降级为普通字符串匹配
+#### 频道格式支持
 
-**匹配行为:**
-- 关键词列表为空时，匹配所有消息
-- 任一关键词匹配成功即触发通知
-- 空关键词会被自动忽略
+支持多种频道标识符格式，系统会自动转换：
 
-**响应:**
+| 输入格式 | 转换结果 | 说明 |
+|----------|----------|------|
+| `@channel_username` | `@channel_username` | 推荐格式 |
+| `https://t.me/channel_username` | `@channel_username` | 完整URL |
+| `t.me/channel_username` | `@channel_username` | 简化URL |
+| `channel_username` | `@channel_username` | 纯用户名 |
+
+#### 关键词匹配模式
+
+**普通字符串匹配** (`useRegex: false`):
+- 不区分大小写的包含匹配
+- 示例：关键词 `"比特币"` 匹配 `"今天比特币价格上涨"`
+
+**正则表达式匹配** (`useRegex: true`):
+- 支持完整正则语法，不区分大小写
+- JSON中需要双反斜杠转义
+- 语法错误时自动降级为字符串匹配
+
+``json
+// 正则表达式示例
+{
+  "keywords": [
+    "\\\\d+",                    // 匹配数字
+    "\\\\$\\\\d+\\\\.\\\\d{2}",        // 匹配价格格式 $45.99
+    "[\\\\u4e00-\\\\u9fa5]+"       // 匹配中文字符
+  ],
+  "useRegex": true
+}
+```
+
+#### 响应格式
+
+**成功响应** (200):
+``json
+{
+  "message": "监控 monitor_001 已成功启动"
+}
+```
+
+**错误响应** (400/500):
 ```json
 {
-  "message": "监控 monitor_001 已启动"
+  "detail": "频道标识符错误: 频道标识符不能为空"
 }
 ```
+
+#### 常见错误码
+
+| 状态码 | 错误类型 | 说明 |
+|--------|----------|------|
+| 400 | 参数错误 | 频道格式错误、ID重复等 |
+| 500 | 服务器配置错误 | API凭证或Bot配置不完整 |
+| 500 | 连接错误 | 无法连接Telegram或找不到频道 |
 
 ### 2. 停止监控
 
@@ -172,17 +206,31 @@ uvicorn server:app --host 0.0.0.0 --port 8080
 
 停止指定的监控任务。
 
-**请求体:**
+#### 请求参数
+
 ```json
 {
   "id": "monitor_001"
 }
 ```
 
-**响应:**
-```json
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| id | string | ✅ | 要停止的监控任务ID |
+
+#### 响应格式
+
+**成功响应** (200):
+``json
 {
   "message": "监控 monitor_001 已停止"
+}
+```
+
+**错误响应** (404):
+```json
+{
+  "detail": "未找到正在运行的监控 monitor_001"
 }
 ```
 
@@ -192,12 +240,39 @@ uvicorn server:app --host 0.0.0.0 --port 8080
 
 获取当前正在运行的监控任务列表。
 
-**响应:**
-```json
+#### 响应格式
+
+``json
 {
   "active_monitors": ["monitor_001", "monitor_002"]
 }
 ```
+
+### 4. 检查服务器配置
+
+**GET** `/config/check`
+
+检查服务器的 Telegram API 和 Bot 配置状态。主要用于前端验证服务器配置完整性。
+
+#### 响应格式
+
+```json
+{
+  "telegram_config_valid": true,
+  "bot_config_valid": true,
+  "all_ready": true,
+  "telegram_message": "已配置 Telegram API",
+  "bot_message": "已配置 3 个通知目标"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| telegram_config_valid | boolean | Telegram API配置是否有效 |
+| bot_config_valid | boolean | Bot配置是否有效 |
+| all_ready | boolean | 所有配置是否就绪 |
+| telegram_message | string | Telegram配置状态描述 |
+| bot_message | string | Bot配置状态描述 |
 
 ## ⚙️ 配置说明
 
@@ -208,7 +283,17 @@ uvicorn server:app --host 0.0.0.0 --port 8080
 | 参数 | 说明 | 示例 |
 |------|------|------|
 | botToken | 从 @BotFather 获取的机器人 Token | 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz |
-| chatId | 目标聊天室的 ID（支持群组、频道、私聊） | -1001234567890 |
+| chatIds | 目标聊天室的 ID 列表（支持多个目标） | ["123456789", "-987654321", "-1001234567890"] |
+
+**支持多个通知目标**：
+- **个人私聊**：正整数 Chat ID（如 `123456789`）
+- **群组**：负整数 Chat ID（如 `-987654321`）
+- **频道**：以 `-100` 开头的 Chat ID（如 `-1001234567890`）
+
+**配置方式**：
+- 环境变量：`TELEGRAM_CHAT_IDS="123456789,-987654321,-1001234567890"`
+- 配置文件：直接修改 `config.py` 中的 `chat_ids` 列表
+- 设置脚本：运行 `python setup.py` 按提示配置
 
 **获取 Chat ID 的方法：**
 
@@ -263,21 +348,32 @@ app.add_middleware(
 
 ### 常见问题
 
-1. **Telegram 登录失败**
+1. **配置文件缺失**
+   - 运行 `./start.sh --setup` 重新配置
+   - 或手动运行 `python setup.py` 进行配置
+
+2. **Telegram 认证失败**
    - 检查 API ID 和 API Hash 是否正确
    - 确保网络连接正常
-   - 首次使用可能需要输入验证码（检查终端输出）
+   - 首次使用需要在控制台输入验证码
+   - 会话文件损坏时需要重新认证
 
-2. **Telegram Bot 通知失败**
-   - 检查 Bot Token 是否正确
-   - 确认 Chat ID 格式是否正确
-   - 确保机器人已被添加到目标聊天室
-   - 检查网络连接是否正常
+3. **Telegram Bot 通知失败**
+   - 检查服务器 Bot Token 是否正确
+   - 确认所有 Chat ID 格式是否正确
+   - 确保机器人已被添加到所有目标聊天室
+   - 查看控制台日志确认发送状态
 
-3. **监控无法启动**
-   - 检查频道名称是否正确（应以 @ 开头）
+4. **监控无法启动**
+   - 检查频道名称是否正确
    - 确保 Telegram 账户已加入该频道
-   - 检查终端日志输出
+   - 检查服务器配置是否完整（运行 `/config/check`）
+   - 查看终端日志获取详细错误信息
+
+5. **服务启动失败**
+   - 运行 `./start.sh` 查看具体错误信息
+   - 检查虚拟环境是否正确激活
+   - 确认所有依赖已安装
 
 ### 日志查看
 
@@ -285,14 +381,25 @@ app.add_middleware(
 - 监控启动/停止状态
 - 消息接收情况
 - 关键词匹配结果
-- Telegram Bot 通知发送状态
+- Telegram Bot 通知发送状态（包括每个 Chat ID 的成功/失败情况）
+- 发送结果汇总（成功数量/失败数量）
+
+**日志示例**：
+```
+[monitor-001] ✅ Telegram 通知已发送至 123456789
+[monitor-001] ❌ 发送至 -987654321 失败: 403 - Bot was blocked by the user
+[monitor-001] ✅ Telegram 通知已发送至 -1001234567890
+[monitor-001] 📄 发送完成: 成功 2/3, 失败 1
+[monitor-001] ⚠️  失败的Chat ID: ['-987654321']
+```
 
 ## 🔐 安全注意事项
 
-1. **API 凭证保护**: 不要将 Telegram API 凭证和 Bot Token 提交到版本控制系统
-2. **Bot Token 安全**: 定期更换 Bot Token，避免泄露
-3. **网络安全**: 生产环境建议使用 HTTPS 和防火墙保护
-4. **会话文件**: `sessions/` 目录包含敏感登录信息，注意保护
+1. **配置文件安全**: `config.py` 包含敏感信息，不要提交到版本控制系统（已在 .gitignore 中排除）
+2. **会话文件保护**: `sessions/` 目录包含 Telegram 登录凭证，需要妥善保管
+3. **Bot Token 安全**: 定期更换 Bot Token，避免泄露
+4. **网络安全**: 生产环境建议使用 HTTPS 和防火墙保护
+5. **CORS 配置**: 生产环境应限制跨域访问来源，不要使用 `allow_origins=["*"]`
 
 ## 📝 开发说明
 
@@ -311,13 +418,7 @@ app.add_middleware(
     "\\b(Bitcoin|BTC)\\b",       // 匹配比特币相关词汇
     "\\w+@\\w+\\.\\w+"          // 匹配邮箱地址
   ],
-  "useRegex": true,
-  "apiId": "your_api_id",
-  "apiHash": "your_api_hash",
-  "telegramBotConfig": {
-    "botToken": "your_bot_token",
-    "chatId": "your_chat_id"
-  }
+  "useRegex": true
 }
 ```
 
