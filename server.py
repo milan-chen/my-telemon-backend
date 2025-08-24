@@ -280,7 +280,18 @@ async def monitor_channel(config: dict, task_ref: dict):
         # 解析频道标识符
         original_channel = config['channel']
         parsed_channel = parse_channel_identifier(original_channel)
+        keywords = config.get('keywords', [])
+        use_regex = config.get('useRegex', False)
+        
         print(f"[{monitor_id}] 监控频道: {parsed_channel}")
+        if keywords:
+            keyword_text = ', '.join(keywords[:3])  # 只显示前3个关键词避免输出过长
+            if len(keywords) > 3:
+                keyword_text += f" (共{len(keywords)}个)"
+            regex_flag = " [正则]" if use_regex else ""
+            print(f"[{monitor_id}] 关键词: {keyword_text}{regex_flag}")
+        else:
+            print(f"[{monitor_id}] 关键词: 全部消息")
         
         try:
             # 先连接客户端
@@ -308,7 +319,6 @@ async def monitor_channel(config: dict, task_ref: dict):
         current_task = asyncio.current_task()
         task_ref['task'] = current_task
         active_monitors[monitor_id] = {'client': client, 'task': current_task, 'config': config}
-        monitor_configs[monitor_id] = config
         
         # 获取频道实体
         try:
