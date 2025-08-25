@@ -146,6 +146,44 @@ def parse_channel_identifier(channel: str) -> str:
     
     return channel
 
+def get_matched_keyword(message_text: str, keywords: List[str], use_regex: bool = False) -> str:
+    """
+    获取消息文本匹配的关键词
+    
+    Args:
+        message_text: 消息文本
+        keywords: 关键词列表
+        use_regex: 是否使用正则表达式匹配
+    
+    Returns:
+        str: 匹配的关键词，如果没有关键词返回"全部消息"
+    """
+    if not keywords:
+        return "全部消息"
+    
+    if not message_text:
+        return "未知"
+    
+    for keyword in keywords:
+        if not keyword:  # 跳过空关键词
+            continue
+            
+        try:
+            if use_regex:
+                # 使用正则表达式匹配（忽略大小写）
+                if re.search(keyword, message_text, re.IGNORECASE):
+                    return keyword
+            else:
+                # 使用普通字符串包含匹配（忽略大小写）
+                if keyword.lower() in message_text.lower():
+                    return keyword
+        except re.error:
+            # 正则表达式语法错误时，降级为普通字符串匹配
+            if keyword.lower() in message_text.lower():
+                return keyword
+    
+    return "未知"
+
 def check_keyword_match(message_text: str, keywords: List[str], use_regex: bool = False) -> bool:
     """
     检查消息文本是否匹配关键词列表
@@ -188,10 +226,31 @@ def check_keyword_match(message_text: str, keywords: List[str], use_regex: bool 
 # --- Telegram Bot 通知逻辑 ---
 def escape_html(text: str) -> str:
     """
-    转义HTML格式的特殊字符
+    转义HTML格式的特殊字符和清理Markdown格式标记
     HTML需要转义的字符: <, >, &
+    清理Markdown格式: **粗体**, *斜体*, __下划线__, `代码`
     """
-    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    # 先转义HTML特殊字符
+    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # 清理Markdown格式标记
+    import re
+    # 处理完整的粗体标记 **text**
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    # 处理不完整的粗体标记（只有开始或结束）
+    text = re.sub(r'\*\*([^*]*?)(?:\*\*|$)', r'\1', text)
+    text = re.sub(r'^([^*]*?)\*\*', r'\1', text)
+    # 清理剩余的单独 ** 标记
+    text = text.replace('**', '')
+    
+    # 处理斜体标记 *text*
+    text = re.sub(r'(?<!\*)\*(?!\*)(.*?)\*(?!\*)', r'\1', text)
+    # 处理下划线标记 __text__
+    text = re.sub(r'__(.*?)__', r'\1', text)
+    # 处理代码标记 `text`
+    text = re.sub(r'`(.*?)`', r'\1', text)
+    
+    return text
 
 async def send_telegram_message(config: dict, message_text: str, message_link: str):
     # 使用服务器配置的Bot
@@ -200,20 +259,17 @@ async def send_telegram_message(config: dict, message_text: str, message_link: s
 
     token = server_config.bot_token
     chat_ids = server_config.chat_ids
-
-    # 构造消息内容
-    notification_header = f"📢 **Telemon 关键词提醒**\n\n- **频道:** {config['channel']}\n- **原文:** [点击查看]({message_link})\n\n**-- 消息内容 --**\n"
     
-    # 限制消息长度以避免 API 错误 (4096 字符限制)
-    max_len = 4096 - len(notification_header.replace('\n', '\n'))
-    truncated_message = message_text
-    if len(truncated_message) > max_len:
-        truncated_message = truncated_message[:max_len-3] + '...'
+    # 获取匹配的关键词
+    keywords = config.get('keywords', [])
+    use_regex = config.get('useRegex', False)
+    matched_keyword = get_matched_keyword(message_text, keywords, use_regex)
     
-    final_message = f"{notification_header}{truncated_message}"
+    # 截取消息内容为100个字符
+    preview_text = message_text[:100] + "..." if len(message_text) > 100 else message_text
     
-    # 转义HTML特殊字符
-    escaped_message = escape_html(final_message)
+    # 构造新的消息格式（保留链接但禁用预览）
+    notification_content = f"📢 <b>Telemon 提醒</b>\n\n- <b>关键词：</b>{matched_keyword}\n- <b>消息内容：</b>{escape_html(preview_text)}\n- <b>原文链接：</b><a href='{message_link}'>点击查看完整内容</a>\n- <b>消息分析：</b>待开发"
     
     # 串行发送到多个 Chat ID
     successful_sends = []
@@ -222,8 +278,9 @@ async def send_telegram_message(config: dict, message_text: str, message_link: s
     for chat_id in chat_ids:
         payload = {
             'chat_id': chat_id,
-            'text': escaped_message,
-            'parse_mode': 'HTML'
+            'text': notification_content,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': True  # 禁用链接预览
         }
         
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -323,7 +380,11 @@ async def monitor_channel(config: dict, task_ref: dict):
         # 获取频道实体
         try:
             channel_entity = await client.get_entity(parsed_channel)
-            print(f"[{monitor_id}] ✅ 获取频道: {channel_entity.title if hasattr(channel_entity, 'title') else parsed_channel}")
+            channel_title = channel_entity.title if hasattr(channel_entity, 'title') else parsed_channel
+            print(f"[{monitor_id}] ✅ 获取频道: {channel_title}")
+            
+            if monitor_id in monitor_configs:
+                monitor_configs[monitor_id]['config']['channelTitle'] = channel_title
         except Exception as e:
             print(f"[{monitor_id}] ❌ 无法获取频道: {e}")
             raise
@@ -610,6 +671,7 @@ async def get_status():
         monitor_info = {
             "id": monitor_id,
             "channel": channel_display,
+            "channelTitle": config.get('channelTitle', channel_display), 
             "keywords": config.get('keywords', []),
             "useRegex": config.get('useRegex', False),
             "status": status
