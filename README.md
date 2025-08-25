@@ -121,7 +121,7 @@ pip install -r requirements.txt
 **Content-Type**: `application/json`
 
 **请求体 (JSON)**:
-``json
+```json
 {
   "id": "monitor_001",
   "channel": "@channel_username", 
@@ -164,7 +164,7 @@ pip install -r requirements.txt
 - JSON中需要双反斜杠转义
 - 语法错误时自动降级为字符串匹配
 
-``json
+```json
 // 正则表达式示例
 {
   "keywords": [
@@ -179,7 +179,7 @@ pip install -r requirements.txt
 #### 响应格式
 
 **成功响应** (200):
-``json
+```json
 {
   "message": "监控 monitor_001 已成功启动"
 }
@@ -221,7 +221,7 @@ pip install -r requirements.txt
 #### 响应格式
 
 **成功响应** (200):
-``json
+```json
 {
   "message": "监控 monitor_001 已停止"
 }
@@ -255,7 +255,7 @@ pip install -r requirements.txt
 #### 响应格式
 
 **成功响应** (200):
-``json
+```json
 {
   "message": "监控 monitor_001 已成功恢复"
 }
@@ -297,7 +297,7 @@ pip install -r requirements.txt
 #### 响应格式
 
 **成功响应** (200):
-``json
+```json
 {
   "message": "监控 monitor_001 已彻底删除"
 }
