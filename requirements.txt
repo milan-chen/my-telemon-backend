@@ -4,3 +4,4 @@ telethon
 pydantic
 email-validator
 httpx
+PyYAML
